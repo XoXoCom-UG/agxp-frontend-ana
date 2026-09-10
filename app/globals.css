@@ -3,40 +3,48 @@
 @tailwind utilities;
 
 /* =============================================================================
-   DESIGN TOKENS — ported from Ana's mockup (agxp-functional-ui, v7).
-   shadcn/ui-style semantic architecture. Dark (near-monochrome graphite, one
-   warm amber accent) is the base; `html.light` overrides for light mode.
-   `--green*` are kept as aliases so existing `var(--green)` references
-   elsewhere in this file (and any leftover legacy code) keep working —
-   only the values here ever need to move again.
+   DESIGN TOKENS — ported from Ana's mockup (agxp-functional-ui, v7), accent
+   swapped from gold to blue per Patryk's 2026-09-02 review ("schwarz mit
+   Blau, transparentes Blau — wie PowerPoint Slides"). Dark (near-monochrome
+   graphite) is the base; `html.light` overrides for light mode. `--green*`
+   are kept as aliases so existing `var(--green)` references elsewhere in
+   this file (and any leftover legacy code) keep working — only the values
+   here ever need to move again.
    ============================================================================= */
 :root {
-  --background:#0A0A0B;
-  --foreground:#F2F1EE;
+  --background:#06080D;
+  --foreground:#EDF2F8;
 
-  --card:#17171A;
-  --card-foreground:#F2F1EE;
-  --popover:#1E1E22;
-  --popover-foreground:#F2F1EE;
+  --card:#0B111B;
+  --card-foreground:#EDF2F8;
+  --popover:#101826;
+  --popover-foreground:#EDF2F8;
 
-  --primary:#D6A25A;
-  --primary-foreground:#1A1408;
-  --primary-soft:#E6BC7E;
+  --primary:#154E80;
+  --primary-foreground:#F1F1F2;
+  --primary-soft:#2E7BC4;
 
-  --secondary:#17171A;
-  --secondary-foreground:#A6A29B;
-  --muted:#17171A;
-  --muted-foreground:#726E68;
-  --accent:#1E1E22;
-  --accent-foreground:#F2F1EE;
+  --secondary:#0E1622;
+  --secondary-foreground:#A9B4C4;
+  --muted:#0E1622;
+  --muted-foreground:#7C8798;
+  --accent:#141E2E;
+  --accent-foreground:#EDF2F8;
+  /* A distinctly-lighter-than-background gray "elevated surface" — the
+     composer and the user's own messages, matching how ChatGPT's own
+     composer clearly reads as a lighter card against a near-black page,
+     not a subtle tint like --accent. */
+  --surface-elevated:#242E3E;
 
-  --destructive:#C4574A;
+  --destructive:#E0574A;
   --destructive-foreground:#FBEAE6;
-  --success:#8FAE93;
+  --success:#3FB27F;
 
-  /* Coach vs Consultant: cool vs warm temperature on the same neutral scale. */
-  --coach-1:#2C2C33; --coach-2:#38383F; --coach-3:#1D1D22;
-  --consultant-1:#2E2925; --consultant-2:#3B3430; --consultant-3:#201C19;
+  /* Coach vs Consultant: near-identical graphite — v8's palette keeps the
+     temperature difference to a whisper (role is carried by icon/label, not
+     color), rather than ana's original blue-navy-tinted panels. */
+  --coach-1:#151920; --coach-2:#1B2029; --coach-3:#0A0C10;
+  --consultant-1:#171B22; --consultant-2:#1D222B; --consultant-3:#0B0D11;
 
   --border:rgba(255,255,255,0.10);
   --border-strong:rgba(255,255,255,0.20);
@@ -105,6 +113,7 @@ html.light {
   --muted-foreground:#8B8B85;
   --accent:#EFEFEC;
   --accent-foreground:#18181B;
+  --surface-elevated:#EBEBE8;
 
   --destructive:#B84B3E;
   --destructive-foreground:#FBEAE6;
