@@ -1,19 +1,29 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Agent, AgentType } from "@/lib/agents";
 import { listMessages, addMessage, touchProjectActivity, renameFromFirstMessage, type Project, type ProjectMessage } from "@/lib/projects";
 import { askAgent } from "@/lib/ask-agent";
 import { parseMarkers } from "@/lib/message-markers";
 import { methodLabel, methodBlurb } from "@/lib/method-labels";
+import { levelFor, nextLevel, LEVEL_ORDER } from "@/lib/agent-progress";
 import { md } from "@/lib/markdown";
 import { useAuth } from "@/lib/auth-context";
+import { useOpenClose } from "@/lib/use-open-close";
+import { usePanelSizeStore } from "@/lib/panel-size-store";
+import { Progress } from "@/components/ui/progress";
 import { AgentMascot, type MascotState } from "@/components/layout/agent-mascot";
+import { LoadingState, LoaderGrid } from "@/components/layout/loading-state";
+import { ThinkingState } from "@/components/layout/thinking-state";
+import { StreamingText } from "@/components/layout/streaming-text";
 import {
-  IconCheck, IconSearch, IconMore, IconDoc, IconDownload, IconX,
-  IconPlus, IconMic, IconChevronDown, IconArrowUp,
+  IconCheck, IconSearch, IconMore, IconDownload, IconX,
+  IconAttach, IconMic, IconArrowUp, IconArrow,
 } from "@/components/layout/agxp-icons";
-import type { Effort } from "@/lib/ask-agent";
+
+// Must match .roadmap-panel.method-panel's CSS width — used to right-align
+// the panel under its trigger button when it first opens.
+const METHOD_PANEL_WIDTH = 520;
 
 // Personalized "welcome back" hero greeting for the empty-conversation state
 // (shown once, centered, before the first message) — not a literal "how can
@@ -59,10 +69,12 @@ function quickActions(agent: Agent) {
   return actions;
 }
 
-export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed, onChangeAgent }: {
+export function ProjectChatPanel({ project, role, agent, flexGrow, projectCount = 0, onProjectNamed, onChangeAgent }: {
   project: Project; role: AgentType; agent: Agent;
-  /** Consultant leads the layout (larger). */
-  primary?: boolean;
+  /** Consultant leads the layout (larger) — grows further while the Coach is still being picked. */
+  flexGrow: number;
+  /** How many of the user's projects this agent has worked on, this one included — drives the Agent Info level. */
+  projectCount?: number;
   onProjectNamed?: (name: string) => void;
   /** Drops this agent back to the picker — reached from the ⋯ menu, never a popup at selection time. */
   onChangeAgent?: () => void;
@@ -72,13 +84,28 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [orb, setOrb] = useState<MascotState>("idle");
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [roadmapOpen, setRoadmapOpen] = useState(false);
+  const menu = useOpenClose();
+  const roadmap = useOpenClose();
+  const agentInfo = useOpenClose();
+  const { swapped, toggle: toggleSwap } = usePanelSizeStore();
+  // Method Group floats near its trigger button rather than at a fixed CSS
+  // offset, and can be dragged anywhere afterward — position lives in state
+  // (not transform, which the t-dropdown pop animation already owns) so the
+  // two never fight over the same CSS property.
+  const roadmapBtnRef = useRef<HTMLButtonElement>(null);
+  const [roadmapPos, setRoadmapPos] = useState<{ top: number; left: number } | null>(null);
+  const roadmapDrag = useRef<{ startX: number; startY: number; startTop: number; startLeft: number } | null>(null);
   const [processingLabel, setProcessingLabel] = useState("");
-  const [effort, setEffort] = useState<Effort>("Standard");
-  const [effortOpen, setEffortOpen] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [recording, setRecording] = useState(false);
+  // Real extended-thinking text, keyed by message id — client-side only, not
+  // persisted (no schema migration available), so it's lost on reload.
+  const [reasoningByMessage, setReasoningByMessage] = useState<Record<string, string[]>>({});
+  // Message ids that should render plain (already animated, or loaded from
+  // history) rather than through the word-by-word StreamingText reveal.
+  const [animatedIds, setAnimatedIds] = useState<Set<string>>(() => new Set());
+  // Which Roadmap download is mid-"generating" (a method name, or "all").
+  const [pdfBusy, setPdfBusy] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const speakTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processingPool = useRef(PROCESSING_BROAD);
@@ -153,11 +180,45 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
 
   useEffect(() => {
     let alive = true;
-    listMessages(project.id, role).then(m => { if (alive) { setMessages(m); setLoaded(true); } }).catch(() => setLoaded(true));
+    listMessages(project.id, role).then(m => {
+      if (!alive) return;
+      setMessages(m);
+      setAnimatedIds(new Set(m.map(msg => msg.id))); // history never replays the reveal
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
     return () => { alive = false; };
   }, [project.id, role]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
+
+  // Anchor Method Group under its trigger button the instant it opens (before
+  // paint, so there's no flash at a stale position), and forget the position
+  // again once it closes so the next open re-anchors fresh.
+  useLayoutEffect(() => {
+    if (roadmap.mounted && !roadmapPos && roadmapBtnRef.current) {
+      const r = roadmapBtnRef.current.getBoundingClientRect();
+      setRoadmapPos({ top: r.bottom + 8, left: r.right - METHOD_PANEL_WIDTH });
+    } else if (!roadmap.mounted && roadmapPos) {
+      setRoadmapPos(null);
+    }
+  }, [roadmap.mounted, roadmapPos]);
+
+  function startRoadmapDrag(e: React.MouseEvent) {
+    if (!roadmapPos) return;
+    roadmapDrag.current = { startX: e.clientX, startY: e.clientY, startTop: roadmapPos.top, startLeft: roadmapPos.left };
+    function onMove(ev: MouseEvent) {
+      const d = roadmapDrag.current;
+      if (!d) return;
+      setRoadmapPos({ top: d.startTop + (ev.clientY - d.startY), left: d.startLeft + (ev.clientX - d.startX) });
+    }
+    function onUp() {
+      roadmapDrag.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   async function send(text: string) {
     const trimmed = text.trim();
@@ -178,9 +239,14 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
         renameFromFirstMessage(project, t).then(name => { if (name) onProjectNamed?.(name); }).catch(() => {});
       }
       const history = [...messages, userMsg].map(m => ({ role: m.role, content: m.content }));
-      const reply = await askAgent(agent, history, effort);
-      await addMessage(project.id, role, "assistant", reply);
-      setMessages(prev => [...prev, { id: crypto.randomUUID(), project_id: project.id, column_type: role, role: "assistant", content: reply, created_at: new Date().toISOString() }]);
+      const reply = await askAgent(agent, history);
+      await addMessage(project.id, role, "assistant", reply.content);
+      const replyId = crypto.randomUUID();
+      setMessages(prev => [...prev, { id: replyId, project_id: project.id, column_type: role, role: "assistant", content: reply.content, created_at: new Date().toISOString() }]);
+      if (reply.thinking) {
+        const paragraphs = reply.thinking.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+        setReasoningByMessage(prev => ({ ...prev, [replyId]: paragraphs }));
+      }
       playSpeaking();
       touchProjectActivity(project.id, `${role === "coach" ? "Coach" : "Consultant"} replied`).catch(() => {});
     } catch (e) {
@@ -198,6 +264,21 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
   const actions = quickActions(agent);
   const firstName = profileName.trim().split(/\s+/)[0] || "";
   const showHero = loaded && messages.length === 0;
+
+  // Shown on demand in the Agent Info panel now, not a permanent Steckbrief.
+  const totalProjects = agent.last_projects.length + projectCount;
+  const level = levelFor(totalProjects);
+  const { next, remaining } = nextLevel(totalProjects);
+
+  // A method's PDF becomes "available" once the conversation has produced
+  // enough back-and-forth to be worth generating from — one method unlocks
+  // per user message, in order, capped at the total. No real per-method
+  // readiness signal exists yet; this is a placeholder heuristic driving the
+  // Method Group progress bar and which downloads are enabled.
+  const roadmapMethods = [...agent.primaryMethods, ...agent.secondaryMethods];
+  const userMessageCount = messages.filter(m => m.role === "user").length;
+  const availableCount = Math.min(roadmapMethods.length, userMessageCount);
+  const availabilityPct = roadmapMethods.length > 0 ? (availableCount / roadmapMethods.length) * 100 : 0;
 
   // Roadmap "downloads" — opens a clean, standalone document with the
   // conversation content and triggers the browser's native print dialog, so
@@ -228,11 +309,22 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
     win.focus();
     win.print();
   }
+  // The print pipeline itself is near-instant — a deliberate minimum delay
+  // gives the "generating" state (the LoaderGrid swapped in for the button's
+  // icon) something real to show instead of flashing for one frame.
   function downloadMethod(methodName: string) {
-    openPrintable(methodLabel(methodName), conversationMarkdown(methodLabel(methodName)));
+    setPdfBusy(methodName);
+    setTimeout(() => {
+      openPrintable(methodLabel(methodName), conversationMarkdown(methodLabel(methodName)));
+      setPdfBusy(null);
+    }, 600);
   }
   function downloadAll() {
-    openPrintable("AI Transformation Roadmap", conversationMarkdown("AI Transformation Roadmap"));
+    setPdfBusy("all");
+    setTimeout(() => {
+      openPrintable("AI Transformation Roadmap", conversationMarkdown("AI Transformation Roadmap"));
+      setPdfBusy(null);
+    }, 600);
   }
 
   // Extracted once so the exact same input/toolbar — same state, same
@@ -256,17 +348,7 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
       <div className="composer-toolbar">
         <div className="composer-left">
           <input ref={fileInputRef} type="file" multiple hidden onChange={onFilesPicked} />
-          <button className="composer-icon-btn" data-tooltip="Attach" onClick={pickFiles}><IconPlus size={15} /></button>
-          <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
-            <button className="effort-pill" onClick={() => setEffortOpen(o => !o)}>{effort}<IconChevronDown size={12} /></button>
-            {effortOpen && (
-              <div className="popover" style={{ top: 36, left: 0, minWidth: 140 }}>
-                {(["Standard", "Extended"] as const).map(e => (
-                  <button key={e} className="mi" onClick={() => { setEffort(e); setEffortOpen(false); }}>{e}</button>
-                ))}
-              </div>
-            )}
-          </div>
+          <button className="composer-icon-btn" data-tooltip="Attach" onClick={pickFiles}><IconAttach size={15} /></button>
         </div>
         <div className="composer-right">
           {micSupported && (
@@ -283,49 +365,108 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
   );
 
   return (
-    <section className={`panel ${role}`} style={primary ? { flex: 2.3 } : undefined}
-      onClick={() => { if (menuOpen) setMenuOpen(false); if (effortOpen) setEffortOpen(false); }}>
+    <section className={`panel ${role}`} style={{ flex: flexGrow }}
+      onClick={() => menu.close()}>
       {/* Head: who this agent is, condensed */}
       <div className="chat-head">
-        <AgentMascot role={role} state={orb} size={46} enter />
+        <button className="mascot-trigger" data-tooltip="Agent info"
+          onClick={() => { agentInfo.toggle(); roadmap.close(); }}>
+          <AgentMascot role={role} state={orb} size={46} enter />
+        </button>
         <div style={{ minWidth: 0 }}>
           <div className="n">{agent.name}</div>
           <div className="r">{role === "coach" ? "Coach" : "Consultant"}</div>
         </div>
         {role === "consultant" && (
-          <button className="roadmap-btn" style={{ marginLeft: "auto" }} onClick={() => setRoadmapOpen(o => !o)}>
-            <IconDoc size={13} />Roadmap
+          <button ref={roadmapBtnRef} className="roadmap-btn roadmap-btn-lg" style={{ marginLeft: "auto" }}
+            onClick={() => { roadmap.toggle(); agentInfo.close(); }}>
+            <span>Method Group</span>
+            <Progress value={availabilityPct} />
           </button>
         )}
-        <div style={{ position: "relative", marginLeft: role === "consultant" ? 0 : "auto" }} onClick={e => e.stopPropagation()}>
-          <button className="chat-menu-btn" data-tooltip="More" onClick={() => setMenuOpen(o => !o)}>
+        {role === "coach" && (
+          <button className="icon-btn" style={{ marginLeft: "auto" }}
+            data-tooltip={swapped ? "Reset panel sizes" : "Give Coach more room"}
+            onClick={e => { e.stopPropagation(); toggleSwap(); }}>
+            <IconArrow style={{ transform: swapped ? "none" : "rotate(180deg)" }} />
+          </button>
+        )}
+        <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
+          <button className="chat-menu-btn" data-tooltip="More" onClick={() => menu.toggle()}>
             <IconMore size={14} />
           </button>
-          {menuOpen && (
-            <div className="popover" style={{ top: 36, right: 0, minWidth: 160 }}>
-              <button className="mi" onClick={() => { setMenuOpen(false); onChangeAgent?.(); }}>Change agent</button>
+          {menu.mounted && (
+            <div className={`popover t-dropdown ${menu.className}`} data-origin="top-right" style={{ top: 36, right: 0, minWidth: 160 }}>
+              <button className="mi" onClick={() => { menu.close(); agentInfo.open(); roadmap.close(); }}>Agent info</button>
+              <button className="mi" onClick={() => { menu.close(); onChangeAgent?.(); }}>Change agent</button>
             </div>
           )}
         </div>
       </div>
 
-      {roadmapOpen && (
-        <div className="roadmap-panel">
+      {agentInfo.mounted && (
+        <div className={`roadmap-panel agent-info-panel t-dropdown ${agentInfo.className}`}>
           <div className="rp-head">
-            <h3>AI Transformation Roadmap</h3>
-            <button className="rp-close" onClick={() => setRoadmapOpen(false)}><IconX size={13} /></button>
+            <h3>{agent.name}</h3>
+            <button className="rp-close" onClick={() => agentInfo.close()}><IconX size={13} /></button>
           </div>
-          <button className="rp-download-all" onClick={downloadAll}><IconDownload size={14} />Download All</button>
           <div className="rp-list">
-            {[...agent.primaryMethods, ...agent.secondaryMethods].map(m => (
+            {agent.description && <p className="agent-info-desc">{agent.description}</p>}
+            <div className="sb-stats">
+              <div>
+                <span className="lbl">Knowledge Level</span>
+                <div className="level">
+                  <b>{level}</b>
+                  <span className="level-bar">
+                    {LEVEL_ORDER.map((l, i) => <span key={l} className={`level-seg ${i <= LEVEL_ORDER.indexOf(level) ? "on" : ""}`} />)}
+                  </span>
+                </div>
+                {next && <div className="level-hint">{remaining} more project{remaining === 1 ? "" : "s"} to {next}</div>}
+              </div>
+              <div><span className="lbl">Previous Projects</span><b>{totalProjects}</b></div>
+              {agent.tagline && <div><span className="lbl">Type</span><b>{agent.tagline}</b></div>}
+            </div>
+            <div className="sb-methods">
+              {agent.primaryMethods.length > 0 && (
+                <div className="grp"><span className="lbl">Primary Methods</span>
+                  <div className="chips">{agent.primaryMethods.map(m => <span key={m.id} className="m-chip shimmer-text">{methodLabel(m.name)}</span>)}</div>
+                </div>
+              )}
+              {agent.secondaryMethods.length > 0 && (
+                <div className="grp"><span className="lbl">Secondary Methods</span>
+                  <div className="chips">{agent.secondaryMethods.map(m => <span key={m.id} className="m-chip secondary shimmer-text">{methodLabel(m.name)}</span>)}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {roadmap.mounted && (
+        <div className={`roadmap-panel method-panel t-dropdown ${roadmap.className}`}
+          style={roadmapPos ? { top: roadmapPos.top, left: roadmapPos.left } : undefined}>
+          <div className="rp-head" onMouseDown={startRoadmapDrag} style={{ cursor: "grab" }}>
+            <h3>Method Group</h3>
+            <button className="rp-close" onMouseDown={e => e.stopPropagation()} onClick={() => roadmap.close()}><IconX size={13} /></button>
+          </div>
+          <button className="rp-download-all" disabled={pdfBusy !== null} onClick={downloadAll}>
+            {pdfBusy === "all" ? <LoaderGrid /> : <IconDownload size={14} />}Download All
+          </button>
+          <div className="rp-list">
+            {roadmapMethods.map((m, i) => (
               <div key={m.id} className="roadmap-item">
                 <span className="ri-name">{methodLabel(m.name)}</span>
-                <button className="ri-dl" data-tooltip="Download" onClick={() => downloadMethod(m.name)}><IconDownload size={13} /></button>
+                <button className="ri-dl" data-tooltip={i < availableCount ? "Download" : "Not yet available"}
+                  disabled={pdfBusy !== null || i >= availableCount} onClick={() => downloadMethod(m.name)}>
+                  {pdfBusy === m.name ? <LoaderGrid /> : <IconDownload size={13} />}
+                </button>
               </div>
             ))}
             {agent.primaryMethods.length === 0 && agent.secondaryMethods.length === 0 && (
               <div className="roadmap-item"><span className="ri-name">Transformation Concept</span>
-                <button className="ri-dl" data-tooltip="Download" onClick={downloadAll}><IconDownload size={13} /></button>
+                <button className="ri-dl" data-tooltip="Download" disabled={pdfBusy !== null} onClick={downloadAll}>
+                  {pdfBusy === "all" ? <LoaderGrid /> : <IconDownload size={13} />}
+                </button>
               </div>
             )}
           </div>
@@ -340,14 +481,16 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
             <div className="chat-hero-inner">
               <div className="chat-hero-greet">{GREETING[role](firstName)}</div>
               <div className="chat-input chat-input--hero">{composer}</div>
-              <div className="hero-actions">
-                {actions.map(a => (
-                  <button key={a.title} className="hero-action" title={a.blurb} onClick={() => send(a.prompt)}>
-                    <span className="qa-ic">{a.icon}</span>
-                    <span className="ha-label">{a.title}</span>
-                  </button>
-                ))}
-              </div>
+              {role === "consultant" && (
+                <div className="hero-actions">
+                  {actions.map(a => (
+                    <button key={a.title} className="hero-action" onClick={() => send(a.prompt)}>
+                      <span className="qa-ic">{a.icon}</span>
+                      <span className="ha-label">{a.title}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -358,9 +501,18 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
               if (m.role === "user") return <div key={m.id} className="msg-user">{m.content}</div>;
               const parsed = parseMarkers(m.content);
               const showChoices = i === lastAssistantIdx && parsed.choices.length > 0 && !sending;
+              const reasoning = reasoningByMessage[m.id];
+              const isNew = !animatedIds.has(m.id);
               return (
                 <div key={m.id} className="msg-agent">
-                  <div className="txt" dangerouslySetInnerHTML={{ __html: md(parsed.text) }} />
+                  {reasoning && <ThinkingState paragraphs={reasoning} />}
+                  {isNew ? (
+                    <div className="txt">
+                      <StreamingText text={parsed.text} onDone={() => setAnimatedIds(prev => new Set(prev).add(m.id))} />
+                    </div>
+                  ) : (
+                    <div className="txt" dangerouslySetInnerHTML={{ __html: md(parsed.text) }} />
+                  )}
                   {showChoices && (
                     <div className="choice-row" style={{ paddingLeft: 0 }}>
                       {parsed.choices.map(c => (
@@ -372,9 +524,7 @@ export function ProjectChatPanel({ project, role, agent, primary, onProjectNamed
               );
             })}
 
-            {sending && (
-              <div className="msg-processing"><span className="tline" /><span className="plabel shimmer-text">{processingLabel}</span></div>
-            )}
+            {sending && <LoadingState label={processingLabel} />}
           </>
         )}
         <div ref={bottomRef} />

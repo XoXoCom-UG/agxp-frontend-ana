@@ -5,12 +5,19 @@ export interface ChatTurn {
   content: string;
 }
 
-// Standard = the usual call. Extended turns on the model's extended
-// thinking for that one request (see app/api/agent/chat/route.ts) — a real
-// difference in what's sent to the model, not a cosmetic label.
-export type Effort = "Standard" | "Extended";
+// Three real, distinct request shapes (see app/api/agent/chat/route.ts),
+// not cosmetic labels: Instant trims max_tokens for a snappier reply,
+// Medium is the everyday default, High turns on the model's extended
+// thinking with a larger token budget.
+export type Effort = "Instant" | "Medium" | "High";
 
-export async function askAgent(agent: Agent, messages: ChatTurn[], effort: Effort = "Standard"): Promise<string> {
+export interface AgentReply {
+  content: string;
+  /** Real extended-thinking text, only ever present at effort:"High". */
+  thinking?: string;
+}
+
+export async function askAgent(agent: Agent, messages: ChatTurn[], effort: Effort = "Medium"): Promise<AgentReply> {
   const res = await fetch("/api/agent/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -18,5 +25,5 @@ export async function askAgent(agent: Agent, messages: ChatTurn[], effort: Effor
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Anfrage fehlgeschlagen.");
-  return data.content as string;
+  return { content: data.content as string, thinking: data.thinking as string | undefined };
 }
